@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import subprocess
 from collections import OrderedDict
 from typing import Callable
 
 
-def _deterministic_order(engines: dict[str, dict]) -> list[str]:
+def _deterministic_order(engines: dict[str, dict[str, Any]]) -> list[str]:
     """Return engines in a fixed order: llamacpp first, then everything else sorted."""
     keys = list(engines.keys())
     if "llamacpp" not in keys:
@@ -18,7 +20,7 @@ def _deterministic_order(engines: dict[str, dict]) -> list[str]:
     return ["llamacpp"] + sorted(others)
 
 
-def plan(state: dict) -> list[dict]:
+def plan(state: dict[str, Any]) -> list[dict[str, str]]:
     """Build one step per engine present in state["engines"].
 
     Each step is::
@@ -27,8 +29,8 @@ def plan(state: dict) -> list[dict]:
 
     Order is deterministic: llamacpp first, then the rest alphabetically.
     """
-    engines = state.get("engines", {})
-    steps: list[dict] = []
+    engines: dict[str, dict[str, Any]] = state.get("engines", {})
+    steps: list[dict[str, str]] = []
     for name in _deterministic_order(engines):
         info = engines[name]
         baseline = info.get("baseline", {})
@@ -37,7 +39,7 @@ def plan(state: dict) -> list[dict]:
     return steps
 
 
-def run(steps: list[dict], runner: Callable[[dict], int]) -> dict:
+def run(steps: list[dict[str, str]], runner: Callable[[dict[str, str]], int]) -> dict[str, object]:
     """Execute *steps* sequentially via the injected *runner*.
 
     Stops at the first non-zero exit code (one failed engine must not lie about

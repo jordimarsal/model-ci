@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, NoReturn
 
 from model_ci.bench import plan as _plan, run as _run
+from model_ci.config import ConfigError, load_config as _load_config
 from model_ci.propose import evidence_pack as _evidence_pack, write as _write
 from model_ci.probe import (
     drift as _drift,
@@ -33,33 +36,39 @@ def _git_ls_remote(url: str) -> str:
     )
 
 
-def _hf_tree(url: str) -> list[dict]:
+def _hf_tree(url: str) -> list[dict[str, Any]]:
     """Default: fetch HF tree API JSON via urllib."""
     import json
     from urllib.request import urlopen
     with urlopen(url, timeout=60) as resp:
-        return json.loads(resp.read())
+        data: list[dict[str, Any]] = json.loads(resp.read())
+        return data
 
 
-def _ggufbench_speed(model: str) -> float:
-    """Default: run ggufbench on *model*, return tps."""
+def _ggufbench_speed(model: str, engine: str = "llama") -> float:
+    """Default: the real ggufbench speed probe of *model* — `ggufbench.run --dims
+    speed` from the workspace root (MODEL_CI_WORKSPACE, default cwd), which starts
+    and stops llama-server itself. Output line '✓ <slug>: speed=NNms (TT.T t/s)'."""
+    import os as _os
     import subprocess
+    workspace = _os.environ.get("MODEL_CI_WORKSPACE", ".")
     out = subprocess.check_output(
-        ["ggufbench", "--model", model, "--tokens", "512"],
-        text=True,
-        timeout=300,
+        [sys.executable, "-m", "ggufbench.run", "--models", model,
+         "--engine", engine, "--dims", "speed", "--thinking", "off",
+         "--context", "fixed"],
+        text=True, timeout=3600, cwd=workspace,
     )
-    # last line is like "tps: 42.7"
     for line in reversed(out.splitlines()):
-        if "tps:" in line.lower():
-            return float(line.split(":", 1)[1].strip())
+        if " t/s)" in line:
+            return float(line.rsplit("(", 1)[1].split("t/s")[0].strip())
     raise RuntimeError("ggufbench did not report tps")
 
 
-def _stabilized(model: str, tokens: int = 512) -> float:
-    """Default: call ``_ggufbench_speed`` three times and take median."""
+def _stabilized(model: str, tokens: int = 512, engine: str = "llama") -> float:
+    """Default: call ``_ggufbench_speed`` three times and take the median
+    (probe.stabilized_tps applies the median — see its docstring for why)."""
     def complete(n: int) -> float:
-        return _ggufbench_speed(model)
+        return _ggufbench_speed(model, engine=engine)
     return _stabilized_tps(complete, generations=3, tokens=tokens)
 
 
@@ -81,7 +90,7 @@ def _alive_strata() -> bool:
         return False
 
 
-def _load(path: str | Path) -> dict:
+def _load(path: str | Path) -> dict[str, Any]:
     """Injectable state loader — defaults to model_ci.state.load (tests monkeypatch
     this hook; do not re-read the type here, the caller already did)."""
     return _state_load(path)
@@ -107,14 +116,66 @@ def _usage_error(msg: str) -> None:
     sys.exit(64)
 
 
-def _env_error(msg: str) -> None:
+def _env_error(msg: str) -> NoReturn:
     print(f"model-ci (environment): {msg}", file=sys.stderr)
     sys.exit(65)
 
 
-def _check(state_path: str, json_out: str | None) -> int:
-    """Core check logic.  Returns the exit code."""
-    # --- load state ---------------------------------------------------------
+_SKELETON_STATE: dict[str, Any] = {"version": 1, "engines": {}, "models": {}}
+
+
+def _atomic_save(path: str | Path, data: dict[str, Any]) -> None:
+    """Write JSON atomically (tmp in the same dir + rename) — a scheduler killed
+    mid-write must not corrupt the state."""
+    p = Path(path)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(p)
+
+
+def _init(state_path: str) -> int:
+    """`model-ci init`: create the v1 skeleton. 65 if it exists — never clobber."""
+    p = Path(state_path)
+    if p.exists():
+        print(f"model-ci (environment): state file already exists: {p}", file=sys.stderr)
+        raise SystemExit(65)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_save(p, _SKELETON_STATE)
+    print(f"wrote {p}")
+    return 0
+
+
+def _accept(engine: str, tps: float, ms: int, model: str, build: str | None,
+            sha: str | None, state_path: str) -> int:
+    """`model-ci accept`: the ONLY way a baseline enters the state — the human
+    accepts a bench result and this stores it for the next drift comparison."""
+    try:
+        state = _load(state_path)
+    except Exception as exc:
+        _env_error(str(exc))
+    from datetime import datetime, timezone
+    entry = state.setdefault("engines", {}).setdefault(engine, {})
+    baseline: dict[str, Any] = {"model": model, "tps": float(tps), "ms": int(ms),
+                                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    if build:
+        baseline["build"] = build
+    if sha:
+        baseline["sha"] = sha
+        entry["sha"] = sha
+    entry["baseline"] = baseline
+    _atomic_save(state_path, state)
+    print(f"accepted baseline for {engine}: {tps} tps · {ms} ms · {model}")
+    return 0
+
+
+def _check(state_path: str, json_out: str | None,
+           config_path: str | None = None) -> int:
+    """Core check logic.  Returns the exit code.
+
+    What to WATCH comes from --config (model-ci.toml) when given; the fallback is the
+    state's engines with a repo. Baselines always live in the state — an engine that
+    drifts WITHOUT an accepted baseline is an environment error (exit 65 with the
+    `model-ci accept` hint), never a silent skip."""
     try:
         state = _load(state_path)
     except Exception as exc:
@@ -123,49 +184,85 @@ def _check(state_path: str, json_out: str | None) -> int:
     engines = state.get("engines", {})
     models_state = state.get("models", {})
 
+    # --- what to watch ------------------------------------------------------
+    watched: dict[str, dict[str, str]] = {}
+    if config_path:
+        try:
+            cfg = _load_config(config_path)
+        except ConfigError as exc:
+            _env_error(str(exc))
+        for name, info in cfg.get("engines", {}).items():
+            watched[name] = {"repo": str(info.get("repo", "")),
+                             "ref": str(info.get("ref") or "refs/heads/main")}
+    else:
+        for name, info in engines.items():
+            repo = info.get("repo") or ""
+            if repo:
+                watched[name] = {"repo": repo, "ref": "refs/heads/main"}
+    watched_models = [str(m.get("repo")) for m in
+                      (cfg or {}).get("models", [])] if config_path else []
+
     # --- watch engines ------------------------------------------------------
     changed_engines: dict[str, str] = {}
-    for name, info in engines.items():
-        repo_url = info.get("repo") or ""
-        baseline_sha = info.get("baseline", {}).get("sha")
-        if not repo_url:
+    drifted_without_baseline: list[str] = []
+    for name, w in watched.items():
+        entry = engines.get(name, {})
+        # el SHA viu a nivell d'entry (schema v1) amb fallback al baseline — els
+        # estats sembrats a mà solen posar-lo només al baseline
+        baseline_sha = entry.get("sha") or entry.get("baseline", {}).get("sha")
+        if not w["repo"]:
             continue
         try:
-            ls_remote_text = _git_ls_remote(repo_url)
+            ls_remote_text = _git_ls_remote(w["repo"])
         except Exception as exc:
             _env_error(f"git ls-remote failed for {name}: {exc}")
-        refs = {}
         from model_ci.watch import parse_ls_remote
         refs = parse_ls_remote(ls_remote_text)
-        ref = "refs/heads/main"
+        ref = w.get("ref") or "refs/heads/main"
         if _engine_changed(baseline_sha, refs, ref):
             changed_engines[name] = refs[ref]
+            if not engines.get(name, {}).get("baseline"):
+                drifted_without_baseline.append(name)
 
     # --- watch models (HF tree) ---------------------------------------------
+    # First sight of a watched repo records its revisions SILENTLY (a rig that just
+    # subscribed did not "detect change" — it learned the baseline); later revisions
+    # of known files are the alert.
     changed_models: dict[str, str] = {}
-    for path, info in models_state.items():
-        hf_url = info.get("hf_tree") or ""
-        if not hf_url:
-            continue
+    state_dirty = False
+    for repo in watched_models:
+        url = (f"https://huggingface.co/api/models/{repo}/tree/main?recursive=true")
         try:
-            entries = _hf_tree(hf_url)
+            entries = _hf_tree(url)
         except Exception as exc:
-            _env_error(f"HF tree fetch failed for {path}: {exc}")
-        hf_shas = {}
+            _env_error(f"HF tree fetch failed for {repo}: {exc}")
         from model_ci.watch import hf_revisions
         hf_shas = hf_revisions(entries)
-        diffs = _models_changed(models_state, hf_shas)
-        changed_models.update(diffs)
+        known = models_state.get(repo, {}).get("files", {})
+        if not known and hf_shas:
+            state.setdefault("models", {})[repo] = {"files": hf_shas}
+            state_dirty = True
+            continue
+        for path, sha in hf_shas.items():
+            if known.get(path) != sha:
+                changed_models[f"{repo}::{path}"] = sha
 
     any_change = bool(changed_engines or changed_models)
+
+    if state_dirty:
+        _atomic_save(state_path, state)
+
+    if drifted_without_baseline:
+        print("model-ci (environment): drifted engine(s) without an accepted baseline: "
+              f"{', '.join(drifted_without_baseline)} — run the full bench, then "
+              "`model-ci accept`", file=sys.stderr)
+        return 65
 
     if json_out is not None and any_change:
         Path(json_out).parent.mkdir(parents=True, exist_ok=True)
         Path(json_out).write_text(
-            __import__("json").dumps({
-                "engines": changed_engines,
-                "models": changed_models,
-            }, indent=2),
+            json.dumps({"engines": changed_engines,
+                        "models": changed_models}, indent=2),
             encoding="utf-8",
         )
 
@@ -175,12 +272,12 @@ def _check(state_path: str, json_out: str | None) -> int:
     # --- probe --------------------------------------------------------------
     # pick the first drifted engine's baseline model (or first model drift)
     probe_model: str | None = None
+    baseline_tps: float | None = None
     for name in sorted(changed_engines):
-        info = engines[name]
-        baseline = info.get("baseline", {})
-        m = baseline.get("model")
-        if m:
-            probe_model = m
+        baseline = engines.get(name, {}).get("baseline", {})
+        if baseline.get("model") and baseline.get("tps") is not None:
+            probe_model = str(baseline["model"])
+            baseline_tps = float(baseline["tps"])
             break
     if not probe_model and changed_models:
         # use first changed model path as a proxy — unlikely but safe fallback
@@ -190,24 +287,16 @@ def _check(state_path: str, json_out: str | None) -> int:
         _env_error("no model to probe after detecting changes")
 
     try:
-        current_tps = _ggufbench_speed(probe_model)
+        drifted_engine = next(iter(sorted(changed_engines)), "llama")
+        gg_engine = "strata" if drifted_engine == "strata" else "llama"
+        current_tps = _ggufbench_speed(probe_model, engine=gg_engine)
     except Exception as exc:
         _env_error(f"probe failed ({exc})")
-
-    # get baseline tps from state or re-bench?  We need it.
-    baseline_tps: float | None = None
-    for name in sorted(changed_engines):
-        baseline = engines[name].get("baseline", {})
-        bt = baseline.get("tps")
-        if bt is not None:
-            baseline_tps = float(bt)
-            break
 
     if baseline_tps is None:
         _env_error("no baseline tps found for a drifted engine; cannot compute drift")
 
     has_drift = _drift(baseline_tps, current_tps)
-
     if not has_drift:
         return 1  # within tolerance
 
@@ -227,13 +316,14 @@ def _check(state_path: str, json_out: str | None) -> int:
 
     # --- stabilized ---------------------------------------------------------
     try:
-        stab_tps = _stabilized(probe_model)
+        stab_tps = _stabilized(probe_model, engine=gg_engine)
     except Exception as exc:
         _env_error(f"stabilized measurement failed ({exc})")
 
     # --- full bench ---------------------------------------------------------
     steps = _plan(state)
-    def runner(step: dict) -> int:
+
+    def runner(step: dict[str, str]) -> int:
         """Default runner: call ggufbench on the step's model."""
         m = step.get("model", "")
         if not m:
@@ -269,7 +359,7 @@ def _check(state_path: str, json_out: str | None) -> int:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Entry point.  Returns an exit code."""
     parser = argparse.ArgumentParser(prog="model-ci", description="Model CI tool")
     sub = parser.add_subparsers(dest="cmd")
@@ -277,6 +367,20 @@ def main(argv=None) -> int:
     check_p = sub.add_parser("check", help="Check for drift and probe")
     check_p.add_argument("--state", default=".model-ci-state.json", help="State file path")
     check_p.add_argument("--json", dest="json_out", default=None, help="Write change JSON to PATH")
+    check_p.add_argument("--config", default=None, metavar="TOML",
+                         help="model-ci.toml: watched engines/repos + HF models")
+
+    init_p = sub.add_parser("init", help="Create the v1 skeleton state file")
+    init_p.add_argument("--state", default=".model-ci-state.json", help="State file path")
+
+    accept_p = sub.add_parser("accept", help="Accept a bench result as the engine baseline")
+    accept_p.add_argument("--engine", required=True, help="Engine name in the state")
+    accept_p.add_argument("--tps", required=True, type=float, help="Generation t/s")
+    accept_p.add_argument("--ms", required=True, type=int, help="Latency ms")
+    accept_p.add_argument("--model", required=True, help="Model slug")
+    accept_p.add_argument("--build", default=None, help="Engine build string")
+    accept_p.add_argument("--sha", default=None, help="Engine commit SHA")
+    accept_p.add_argument("--state", default=".model-ci-state.json", help="State file path")
 
     probe_p = sub.add_parser("probe", help="Probe a single model")
     probe_p.add_argument("--stabilized", type=int, default=1, metavar="N",
@@ -291,11 +395,18 @@ def main(argv=None) -> int:
 
     if args.cmd == "check":
         try:
-            rc = _check(args.state, args.json_out)
+            rc = _check(args.state, args.json_out, args.config)
         except SystemExit as exc:
             # propagate our own exits; catch unexpected ones
             return int(exc.code or 0)
         return rc
+
+    if args.cmd == "init":
+        return _init(args.state)
+
+    if args.cmd == "accept":
+        return _accept(args.engine, args.tps, args.ms, args.model,
+                       args.build, args.sha, args.state)
 
     if args.cmd == "probe":
         try:

@@ -2,6 +2,7 @@
 """probe — drift math, machine guards, stabilized-generation measurement."""
 
 from statistics import median
+from typing import Callable
 
 
 def drift(baseline: float, current: float, tolerance: float = 0.10) -> bool:
@@ -16,7 +17,7 @@ def drift(baseline: float, current: float, tolerance: float = 0.10) -> bool:
 
 
 def stabilized_tps(
-    complete: callable[[int], float],
+    complete: Callable[[int], float],
     generations: int = 3,
     tokens: int = 512,
 ) -> float:
@@ -26,7 +27,7 @@ def stabilized_tps(
     outlier is a lie.
     """
     samples = [complete(tokens) for _ in range(generations)]
-    return median(samples)
+    return float(median(samples))
 
 
 def parse_compute_apps(csv_text: str) -> list[tuple[int, int]]:
@@ -53,7 +54,7 @@ def quiet_machine(
     load1: float,
     nproc: int,
     compute_apps: list[tuple[int, int]],
-    allow: set[int] = frozenset(),
+    allow: frozenset[int] = frozenset(),
     max_load_ratio: float = 0.5,
     min_free_mib: int = 2000,
 ) -> tuple[bool, str]:

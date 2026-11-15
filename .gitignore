@@ -1,3 +1,5 @@
 
 # harness installer backups (pre-update copies) — machine scratch
 harness/backup/
+model-ci.toml
+.model-ci-state.json

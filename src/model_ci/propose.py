@@ -14,7 +14,7 @@ def evidence_pack(
     engine: str,
     build: str,
     model: str,
-    receipts: dict,
+    receipts: dict[str, str],
 ) -> str:
     """Return a single markdown string with drift evidence.
 

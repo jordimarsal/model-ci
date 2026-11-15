@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any, cast
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ _EMPTY_SKELETON = {"version": _CURRENT_VERSION, "engines": {}, "models": {}}
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _validate_version(state: dict) -> None:
+def _validate_version(state: dict[str, Any]) -> None:
     """Raise *StateError* if ``state`` does not declare a supported version."""
     ver = state.get("version")
     if ver is None:
@@ -52,7 +53,7 @@ def _validate_version(state: dict) -> None:
         )
 
 
-def _load_raw(path: Path) -> dict:
+def _load_raw(path: Path) -> dict[str, Any]:
     """Read and parse JSON; return raw dict.
 
     Returns the empty skeleton for missing files.
@@ -71,14 +72,14 @@ def _load_raw(path: Path) -> dict:
         raise StateError(path, f"invalid JSON ({exc})") from exc
 
     _validate_version(state)
-    return state
+    return cast(dict[str, Any], state)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def load(path: str | Path) -> dict:
+def load(path: str | Path) -> dict[str, Any]:
     """Load the state file at *path*.
 
     Missing file → returns the v1 skeleton.
@@ -87,7 +88,7 @@ def load(path: str | Path) -> dict:
     return _load_raw(Path(path))
 
 
-def save(path: str | Path, state: dict) -> None:
+def save(path: str | Path, state: dict[str, Any]) -> None:
     """Atomically write *state* to *path*.
 
     Validates that ``version`` is present and equals 1 before writing.
@@ -119,7 +120,7 @@ def save(path: str | Path, state: dict) -> None:
         raise
 
 
-def migrate(path: str | Path) -> dict:
+def migrate(path: str | Path) -> dict[str, Any]:
     """Migrate the state file at *path* to the current schema version.
 
     For v1 today this is a no-op — it simply loads and returns the state.

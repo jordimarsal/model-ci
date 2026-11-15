@@ -99,7 +99,7 @@ class TestCli(unittest.TestCase):
         def fake_ls_remote(url):
             return "new_sha\trefs/heads/main\n"
 
-        def fake_speed(model):
+        def fake_speed(model, engine="llama"):
             return 51.0  # within 10% of 50.0
 
         self._patch_hooks(
@@ -133,10 +133,10 @@ class TestCli(unittest.TestCase):
                 return "new_sha\trefs/heads/main\n"
             return "other_sha\trefs/heads/main\n"
 
-        def fake_speed(model):
+        def fake_speed(model, engine="llama"):
             return 40.0  # drift from 50.0
 
-        def fake_stabilized(model):
+        def fake_stabilized(model, tokens=512, engine="llama"):
             return 42.0
 
         def fake_runner(step):
@@ -174,7 +174,7 @@ class TestCli(unittest.TestCase):
         def fake_ls_remote(url):
             return "new_sha\trefs/heads/main\n"
 
-        def fake_speed(model):
+        def fake_speed(model, engine="llama"):
             return 40.0
 
         self._patch_hooks(
@@ -211,7 +211,7 @@ class TestCli(unittest.TestCase):
         def fake_ls_remote(url):
             return "new_sha\trefs/heads/main\n"
 
-        def fake_speed(model):
+        def fake_speed(model, engine="llama"):
             return 40.0
 
         self._patch_hooks(

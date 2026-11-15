@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 def parse_ls_remote(output: str) -> dict[str, str]:
     """Parse ``git ls-remote`` output into a mapping of ref → SHA.
@@ -53,7 +55,7 @@ def engine_changed(
     return current_sha != baseline_sha
 
 
-def hf_revisions(entries: list[dict]) -> dict[str, str]:
+def hf_revisions(entries: list[dict[str, Any]]) -> dict[str, str]:
     """Extract SHA-256 hashes from HF tree API entries for every ``*.gguf`` file.
 
     Each entry may carry either::
@@ -68,7 +70,7 @@ def hf_revisions(entries: list[dict]) -> dict[str, str]:
     """
     result: dict[str, str] = {}
     for entry in entries:
-        path = entry.get("path", "")
+        path = str(entry.get("path", ""))
         if not path.endswith(".gguf"):
             continue
         sha: str | None = None
@@ -78,14 +80,14 @@ def hf_revisions(entries: list[dict]) -> dict[str, str]:
             # strip optional prefix like "sha256:"
             sha = oid.split(":", 1)[-1] if ":" in oid else oid
         if not sha and (flat := entry.get("lfs_sha256")):
-            sha = flat
+            sha = str(flat)
         if sha:
             result[path] = sha
     return result
 
 
 def models_changed(
-    state_models: dict[str, dict], hf: dict[str, str]
+    state_models: dict[str, dict[str, str]], hf: dict[str, str]
 ) -> dict[str, str]:
     """Return files that are new or whose SHA changed compared with *state_models*.
 
