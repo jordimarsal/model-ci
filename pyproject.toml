@@ -1,0 +1,29 @@
+[project]
+name = "model-ci"
+version = "0.1.0"
+description = "Keep the local model fleet honest: watch engines and models, detect drift, bench, open a human gate."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+model-ci = "model_ci.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/model_ci"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["src"]

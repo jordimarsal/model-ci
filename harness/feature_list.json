@@ -1,0 +1,25 @@
+{
+  "project": {
+    "name": "model-ci",
+    "parallel": false,
+    "modules": [
+      "vertical-slices",
+      "security-audit",
+      "gauntlet",
+      "decision-memory"
+    ],
+    "audit_level": "standard",
+    "workflow": "full",
+    "harness_version": "v0.11.0-3-g5d9de34",
+    "architecture": "hexagonal"
+  },
+  "features": [
+    {
+      "id": 1,
+      "name": "fleet_watch_loop",
+      "title": "Bucle de vigilància de l'estol: engines + models HF → probe → drift → bench → proposta debrief",
+      "description": "model-ci check com a one-shot per scheduler (estol/cron): vigila SHAs de llama.cpp/Strata i revisions HF de repos vigilats; en canvi, probe de velocitat (micro com a fum + 512tok estabilitzat com a confirmació); si derivació >±10%, bench complet seqüencial per engine (regla d'or GPU, guard de màquina tranquil·la) i evidència per al gate humà via debrief. Sense auto-apply ni auto-prune. Especificació: docs/specs/2026-11-15-model-ci-design.md (T1-T6).",
+      "status": "spec_ready"
+    }
+  ]
+}
